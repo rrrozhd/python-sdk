@@ -3359,7 +3359,8 @@ REQUIREMENTS: dict[str, Requirement] = {
         transports=("streamable-http",),
         note=(
             "Only observable over streamable HTTP: the HTTP status is the assertion. Kernel-origin "
-            "METHOD_NOT_FOUND keeps its explicit 404 mapping; other dispatched errors are in-band on 200."
+            "METHOD_NOT_FOUND keeps its explicit 404 mapping; errors without an explicit status "
+            "mapping are in-band on 200."
         ),
     ),
     "hosting:http:modern:envelope-missing-key-status-400": Requirement(
