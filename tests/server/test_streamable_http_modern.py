@@ -654,6 +654,27 @@ async def test_sse_mode_error_before_any_notify_is_json_with_mapped_status() -> 
     assert response.json() == {"jsonrpc": "2.0", "id": 1, "error": {"code": METHOD_NOT_FOUND, "message": "nope"}}
 
 
+@pytest.mark.parametrize("json_response", [True, False], ids=["json", "sse"])
+async def test_handler_invalid_params_error_is_in_band_on_http_200(json_response: bool) -> None:
+    """Spec-mandated: once a request passes the validation ladder, a handler's error whose code the
+    spec assigns no HTTP status (here -32602, as for a missing resource) is answered in-band on 200."""
+
+    async def list_tools(ctx: ServerRequestContext, params: PaginatedRequestParams | None) -> ListToolsResult:
+        raise MCPError(code=INVALID_PARAMS, message="Resource not found")
+
+    async with _asgi_client(Server("test", on_list_tools=list_tools), json_response=json_response) as http:
+        with anyio.fail_after(5):
+            response = await http.post("/mcp", json=_list_tools_body(), headers={MCP_METHOD_HEADER: "tools/list"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].split(";", 1)[0] == "application/json"
+    assert response.json() == {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {"code": INVALID_PARAMS, "message": "Resource not found"},
+    }
+
+
 async def test_sse_mode_error_after_notify_is_sse_event() -> None:
     """SSE mode: an error raised after the handler has emitted is delivered as the terminal SSE
     event (HTTP 200) — `text/event-stream` headers were committed on the first notification."""
@@ -1202,13 +1223,14 @@ async def test_modern_post_rejects_a_duplicated_routing_header() -> None:
 async def test_modern_tools_call_mis_shaped_envelope_skips_validation_without_an_error_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A mis-shaped envelope value is a debug-logged client fault; the wire reply is dispatch's INVALID_PARAMS."""
+    """A mis-shaped envelope value is a debug-logged client fault; the wire reply is dispatch's INVALID_PARAMS,
+    in-band on 200 because the classifier (presence-only) accepted the request."""
     body = _tool_call_body({"region": "eu"})
     body["params"]["_meta"][CLIENT_INFO_META_KEY] = "not-an-object"
     with caplog.at_level(logging.DEBUG, logger=_streamable_http_modern.__name__):
         async with _asgi_client(_x_mcp_server()) as http:
             response = await http.post("/mcp", json=body, headers=_TOOL_CALL_HEADERS | {"mcp-param-region": "eu"})
-    assert response.status_code == 400
+    assert response.status_code == 200
     assert response.json()["error"]["code"] == INVALID_PARAMS
     module_records = [r for r in caplog.records if r.name == _streamable_http_modern.__name__]
     assert all(r.levelno < logging.ERROR for r in module_records)

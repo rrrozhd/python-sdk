@@ -304,7 +304,8 @@ def _value_at_path(arguments: Mapping[str, Any], path: tuple[str, ...]) -> Any:
 
 
 # INTERNAL_ERROR is deliberately unmapped (→ HTTP 200): the spec assigns no status to
-# -32603, and whether handler-origin errors get 5xx is an open S4 question — see TODO(L66).
+# -32603. This table does not decide handler-origin errors; whether those ever get 5xx is an
+# open S4 question — see TODO(L66).
 ERROR_CODE_HTTP_STATUS: Final[Mapping[int, int]] = MappingProxyType(
     {
         PARSE_ERROR: 400,
@@ -316,11 +317,13 @@ ERROR_CODE_HTTP_STATUS: Final[Mapping[int, int]] = MappingProxyType(
         METHOD_NOT_FOUND: 404,
     }
 )
-"""HTTP status to send for a JSON-RPC `error.code`.
+"""HTTP status to send for a validation-ladder rejection's JSON-RPC `error.code`.
 
-Consulted for classifier-origin *and* handler-origin errors, so one table
-decides the wire status regardless of where the error was produced. Unmapped
-codes fall back to the caller's default (typically 200).
+Covers errors produced before dispatch only. An error from a dispatched request
+gets a non-200 status only when the spec assigns its code one (METHOD_NOT_FOUND,
+HEADER_MISMATCH, MISSING_REQUIRED_CLIENT_CAPABILITY, UNSUPPORTED_PROTOCOL_VERSION);
+otherwise it is in-band on 200, so a handler's `INVALID_PARAMS` is not a 400.
+Unmapped codes fall back to the caller's default (typically 200).
 """
 
 
