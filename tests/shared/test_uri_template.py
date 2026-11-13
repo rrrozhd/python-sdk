@@ -780,6 +780,25 @@ def test_match_with_many_ifemp_captures_decodes_linearly(monkeypatch: pytest.Mon
     assert len(decoded) <= 4 * k
 
 
+def test_match_with_many_nonempty_ifemp_captures_does_not_depend_on_stack_depth():
+    # A raised max_variables must keep working: matching may not recurse
+    # once per {;a_i} capture.
+    k = 1100
+    t = UriTemplate.parse("".join(f"{{;a{i}}}" for i in range(k)) + "/{+rest}", max_variables=k + 1)
+    result = t.match("".join(f";a{i}=v" for i in range(k)) + "/tail")
+    assert result == {**{f"a{i}": "v" for i in range(k)}, "rest": "tail"}
+
+
+def test_match_rejects_ifemp_captures_needing_mixed_forms():
+    # Known gap (pinned): {;c} needs '=value' and {;a} needs the empty form.
+    # Neither the '=value'-preferring pass nor main's empty-preferring pass
+    # finds that mix, so this expansion stays unmatched, as before the fix.
+    t = UriTemplate.parse("{;c}=tail{.d}Y{;a}=end{.b}X{+rest}")
+    uri = t.expand({"c": "tail.", "d": "bar", "a": "", "b": "foo", "rest": "=end.bar.bazX/x"})
+    assert uri == ";c=tail.=tail.barY;a=end.fooX=end.bar.bazX/x"
+    assert t.match(uri) is None
+
+
 def test_match_prefix_ifemp_empty_before_non_stop_literal():
     # Regression: _scan_prefix rejected the empty-value case when the
     # following template literal starts with a non-stop-char. The
