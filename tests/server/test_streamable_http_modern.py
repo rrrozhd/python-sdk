@@ -660,7 +660,7 @@ async def test_handler_invalid_params_error_is_in_band_on_http_200(json_response
     spec assigns no HTTP status (here -32602, as for a missing resource) is answered in-band on 200."""
 
     async def list_tools(ctx: ServerRequestContext, params: PaginatedRequestParams | None) -> ListToolsResult:
-        raise MCPError(code=INVALID_PARAMS, message="Resource not found")
+        raise MCPError(code=INVALID_PARAMS, message="Resource not found", data={"uri": "demo://missing"})
 
     async with _asgi_client(Server("test", on_list_tools=list_tools), json_response=json_response) as http:
         with anyio.fail_after(5):
@@ -671,7 +671,7 @@ async def test_handler_invalid_params_error_is_in_band_on_http_200(json_response
     assert response.json() == {
         "jsonrpc": "2.0",
         "id": 1,
-        "error": {"code": INVALID_PARAMS, "message": "Resource not found"},
+        "error": {"code": INVALID_PARAMS, "message": "Resource not found", "data": {"uri": "demo://missing"}},
     }
 
 
