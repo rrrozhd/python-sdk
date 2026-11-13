@@ -292,9 +292,9 @@ async def test_modern_removed_method_is_method_not_found_at_http_404() -> None:
     """A 2026-07-28 ping (removed at 2026) is answered METHOD_NOT_FOUND and the HTTP status is 404.
 
     Spec-mandated for the error code: ping is not a defined method at 2026-07-28 so the kernel's
-    method/version gate rejects it. SDK-defined for the HTTP status: kernel-origin METHOD_NOT_FOUND
-    travels through the same error-code-to-status table as classifier-origin errors. Asserted at the
-    wire because the HTTP status is the assertion.
+    method/version gate rejects it. Spec-mandated for the HTTP status: kernel-origin METHOD_NOT_FOUND
+    keeps its explicit 404 mapping, one of the few codes a dispatched error is not in-band on 200 for.
+    Asserted at the wire because the HTTP status is the assertion.
     """
     body = {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {"_meta": _meta_envelope()}}
     async with mounted_app(_server()) as (http, _):

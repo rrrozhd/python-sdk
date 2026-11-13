@@ -129,10 +129,11 @@ Notice there is no `is_error=True` half-result here. A resource read either retu
 
 !!! info
     Over Streamable HTTP at protocol `2026-07-28`, a protocol error your handler raises travels
-    in-band: HTTP `200`, with the JSON-RPC error as the body. Only codes the spec gives their own
-    status change that: `-32601` method not found is `404`, and `-32020`, `-32021` and `-32022`
-    (header mismatch, missing client capability, unsupported protocol version) are `400`. A `400`
-    carrying `-32602` means the transport rejected a malformed request before any handler ran.
+    in-band: HTTP `200`, carrying the JSON-RPC error response (or, once the handler has started an
+    SSE stream, the final event on it). Before the response has started, only codes the spec gives
+    their own status change that: `-32601` method not found is `404`, and `-32020`, `-32021` and
+    `-32022` (header mismatch, missing client capability, unsupported protocol version) are `400`.
+    A `400` carrying `-32602` means the transport rejected a malformed request before any handler ran.
 
 ## Errors you never raise
 
