@@ -712,6 +712,13 @@ def test_match_greedy_rejection_paths(template: str, uri: str):
         # check runs first so '=' is not mistaken for the ifemp separator.
         ("api{;key}=base/{+path}", "api;key=base/a/b", {"key": "", "path": "a/b"}),
         ("api{;key}=base/{+path}", "api;key=v=base/x", {"key": "v", "path": "x"}),
+        # A value equal to the literal's tail: '=value' wins over the empty
+        # form when the literal follows the value (python-sdk issue 3852).
+        ("{;a}=end{+rest}", ";a=end=end/x", {"a": "end", "rest": "/x"}),
+        # No literal after a value within the stop-char span: empty form.
+        ("{;a}=end{+rest}", ";a=end/x=end/y", {"a": "", "rest": "/x=end/y"}),
+        # The later '=end' belongs to the suffix, not the prefix.
+        ("{;a}=end{+rest}=end/z", ";a=endx=end/z", {"a": "", "rest": "x"}),
     ],
 )
 def test_match_prefix_scan_edge_cases(template: str, uri: str, expected: dict[str, str]):
@@ -729,6 +736,23 @@ def test_match_prefix_scan_edge_cases(template: str, uri: str, expected: dict[st
 )
 def test_match_suffix_ifemp_equals_in_value(template: str, uri: str, expected: dict[str, str]):
     assert UriTemplate.parse(template).match(uri) == expected
+
+
+@pytest.mark.parametrize(
+    ("template", "variables"),
+    [
+        ("{;a}=end{+rest}", {"a": "end", "rest": "/x"}),
+        ("{;a}=end{+rest}", {"a": "", "rest": "/x"}),
+        ("/api{;mode}=fast{/id}", {"mode": "fast", "id": "7"}),
+        ("/api{;mode}=fast{/id}", {"mode": "", "id": "7"}),
+        # '=value' finds the literal but the rest of the prefix then fails,
+        # so the empty form is the only parse.
+        ("{;a}=end{.b}X{+rest}", {"a": "", "b": "foo", "rest": "=end.bar.bazX/x"}),
+    ],
+)
+def test_match_round_trips_ifemp_before_equals_literal(template: str, variables: dict[str, str]):
+    t = UriTemplate.parse(template)
+    assert t.match(t.expand(variables)) == variables
 
 
 def test_match_prefix_ifemp_empty_before_non_stop_literal():

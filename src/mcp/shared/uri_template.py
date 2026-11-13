@@ -13,11 +13,13 @@ Matching semantics
 ------------------
 
 Matching is not specified by RFC 6570 (§1.4 explicitly defers to regex
-languages). This implementation uses a two-ended scan that never
-backtracks: match time is O(n·v) where n is URI length and v is the
-number of template variables. Realistic templates have v < 10, making
-this effectively linear; there is no input that produces
-superpolynomial time.
+languages). This implementation uses a two-ended scan whose only
+backtracking is retrying a ``{;var}`` followed by a literal that starts
+with ``=`` as empty: match time is O(2^k·n·v) where n is URI length, v
+is the number of template variables and k (a property of the template,
+usually 0) is the number of such ``{;var}`` expressions. Realistic
+templates have v < 10, making this effectively linear; there is no
+input that produces superpolynomial time.
 
 A template may contain **at most one multi-segment variable** —
 ``{+var}``, ``{#var}``, or an explode-modified variable (``{/var*}``,
@@ -1082,19 +1084,29 @@ def _scan_prefix(
             # RFC §3.2.7 ifemp: ;name=val for non-empty, bare ;name for
             # empty. Decide which form is present without falling through
             # to the stop-char scan when the value is empty.
+            if pos < limit and uri[pos] == "=":
+                # Try '=value' before the empty form: for a literal starting
+                # with '=', ';a=end=end' reads as a='end' or as a='' then
+                # '=end', and expand() produces it for a='end'. If the rest
+                # of the prefix fails after the value, fall back to the
+                # empty form. Each such capture at most doubles the work,
+                # which stays linear in the URI length.
+                latest = pos + 1
+                while latest < limit and uri[latest] not in stops:
+                    latest += 1
+                end = uri.find(nxt.text, pos + 1, min(latest + len(nxt.text), limit))
+                if end != -1:
+                    tail = _scan_prefix(atoms[i + 1 :], uri, end, limit)
+                    if tail is not None:
+                        tail_result, tail_end = tail
+                        return {**result, var.name: unquote(uri[pos + 1 : end]), **tail_result}, tail_end
             if uri.startswith(nxt.text, pos):
                 # Following literal begins immediately: value is empty.
-                # Checked before '=' so a literal that itself starts
-                # with '=' is not mistaken for the ifemp separator.
                 result[var.name] = ""
                 continue
-            if pos < limit and uri[pos] == "=":
-                pos += 1  # value follows; fall through to the scan
-            else:
-                # The following literal does not start here and there is
-                # no '=': the URI's name continued past the template's
-                # (e.g. ;keys vs ;key) — no parse.
-                return None
+            # Neither form fits: the URI's name continued past the
+            # template's (e.g. ;keys vs ;key) — no parse.
+            return None
 
         # Latest valid end: the var stops at the first stop-char or
         # the scan limit, whichever comes first.
