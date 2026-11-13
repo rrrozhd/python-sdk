@@ -3359,7 +3359,8 @@ REQUIREMENTS: dict[str, Requirement] = {
         transports=("streamable-http",),
         note=(
             "Only observable over streamable HTTP: the HTTP status is the assertion. Kernel-origin "
-            "METHOD_NOT_FOUND travels through the same status table as classifier-origin errors."
+            "METHOD_NOT_FOUND keeps its explicit 404 mapping; errors without an explicit status "
+            "mapping are in-band on 200."
         ),
     ),
     "hosting:http:modern:envelope-missing-key-status-400": Requirement(
@@ -3376,8 +3377,9 @@ REQUIREMENTS: dict[str, Requirement] = {
         source="sdk",
         behavior=(
             "A handler-raised MCPError on the 2026-07-28 entry reaches the wire as a top-level "
-            "JSON-RPC error with its data preserved, and the HTTP status is the error-code table "
-            "entry for that code (handler-origin and classifier-origin errors share one table)."
+            "JSON-RPC error with its data preserved, at HTTP 200 unless the spec assigns its code a "
+            "status (METHOD_NOT_FOUND 404; HEADER_MISMATCH, MISSING_REQUIRED_CLIENT_CAPABILITY and "
+            "UNSUPPORTED_PROTOCOL_VERSION 400); the full error-code table applies only to validation-ladder rejections."
         ),
         added_in="2026-07-28",
         transports=("streamable-http",),

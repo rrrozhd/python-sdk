@@ -292,9 +292,9 @@ async def test_modern_removed_method_is_method_not_found_at_http_404() -> None:
     """A 2026-07-28 ping (removed at 2026) is answered METHOD_NOT_FOUND and the HTTP status is 404.
 
     Spec-mandated for the error code: ping is not a defined method at 2026-07-28 so the kernel's
-    method/version gate rejects it. SDK-defined for the HTTP status: kernel-origin METHOD_NOT_FOUND
-    travels through the same error-code-to-status table as classifier-origin errors. Asserted at the
-    wire because the HTTP status is the assertion.
+    method/version gate rejects it. Spec-mandated for the HTTP status: kernel-origin METHOD_NOT_FOUND
+    keeps its explicit 404 mapping, one of the few codes a dispatched error is not in-band on 200 for.
+    Asserted at the wire because the HTTP status is the assertion.
     """
     body = {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {"_meta": _meta_envelope()}}
     async with mounted_app(_server()) as (http, _):
@@ -324,11 +324,11 @@ async def test_modern_envelope_missing_required_meta_key_is_invalid_params_at_ht
 
 @requirement("hosting:http:modern:handler-error-status-via-table")
 async def test_modern_handler_raised_mcperror_maps_to_status_via_error_code_table() -> None:
-    """A handler-raised ``MCPError`` reaches the wire as a top-level JSON-RPC error at the table-mapped HTTP status.
+    """A handler-raised ``MCPError`` reaches the wire as a top-level JSON-RPC error at its spec-assigned HTTP status.
 
-    SDK-defined for the HTTP status: the modern entry maps every JSON-RPC ``error.code`` -- whether
-    classifier-origin or handler-origin -- through one error-code-to-status table, so a handler
-    raising ``MISSING_REQUIRED_CLIENT_CAPABILITY`` produces HTTP 400 with ``error.data`` preserved.
+    Spec-mandated for the HTTP status: a dispatched request's error is in-band on 200 unless the spec
+    assigns its code a status, and ``MISSING_REQUIRED_CLIENT_CAPABILITY`` is one such code, so a
+    handler raising it produces HTTP 400 with ``error.data`` preserved.
     Spec-mandated for the error code: the named code and its ``requiredCapabilities`` data shape are
     the spec's capability-gating contract. Registered via the low-level ``add_request_handler`` so
     the high-level tool wrapper's error-swallowing is not on the path.

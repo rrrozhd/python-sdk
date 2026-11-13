@@ -127,6 +127,14 @@ When it can't, raise `ResourceNotFoundError`. The SDK turns it into the protocol
 
 Notice there is no `is_error=True` half-result here. A resource read either returns contents or fails: resources have only the protocol path. `ResourceError` is the same thing for a failure that isn't "not found" (`-32603`, your message), and both are one `INFO` line in your log. Any other exception bar `MCPError` is a crash: the client gets `-32603` naming only the URI, and the traceback goes to your log at `ERROR`. Templates and everything else about resources live in **[Resources](resources.md)**.
 
+!!! info
+    Over Streamable HTTP at protocol `2026-07-28`, a protocol error your handler raises travels
+    in-band: HTTP `200`, carrying the JSON-RPC error response (or, once the handler has started an
+    SSE stream, the final event on it). Before the response has started, only codes the spec gives
+    their own status change that: `-32601` method not found is `404`, and `-32020`, `-32021` and
+    `-32022` (header mismatch, missing client capability, unsupported protocol version) are `400`.
+    A `400` carrying `-32602` means the transport rejected a malformed request before any handler ran.
+
 ## Errors you never raise
 
 A bad argument never reaches your function.

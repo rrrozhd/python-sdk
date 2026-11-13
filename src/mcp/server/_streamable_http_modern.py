@@ -13,10 +13,11 @@ mode handles the request directly in the ASGI task. SSE mode runs the handler
 as a sibling task and defers committing to `text/event-stream` until the
 handler emits a notification or `_SSE_PING_INTERVAL` elapses, whichever
 comes first: a handler that completes (or raises) within that window without
-emitting still gets a JSON response with the table-mapped HTTP status, so
-the spec's `404`/`400` MUSTs hold for kernel-dispatch errors; a handler that
-runs silent past the window commits SSE so the keepalive ping can keep the
-connection open behind a proxy idle-read timeout.
+emitting still gets a JSON response, so an error the spec assigns a status
+(`404` for METHOD_NOT_FOUND) still gets it; a handler that runs silent past the
+window commits SSE so the keepalive ping can keep the connection open behind a
+proxy idle-read timeout. Any other error from a dispatched request is in-band on
+`200`: `ERROR_CODE_HTTP_STATUS` as a whole applies only to the validation ladder.
 """
 
 from __future__ import annotations
@@ -34,8 +35,11 @@ from mcp_types import (
     CLIENT_INFO_META_KEY,
     HEADER_MISMATCH,
     INVALID_REQUEST,
+    METHOD_NOT_FOUND,
+    MISSING_REQUIRED_CLIENT_CAPABILITY,
     PARSE_ERROR,
     PROTOCOL_VERSION_META_KEY,
+    UNSUPPORTED_PROTOCOL_VERSION,
     ErrorData,
     JSONRPCError,
     JSONRPCNotification,
@@ -171,14 +175,27 @@ async def _write_rejection(
     await _write(rej, scope, receive, send)
 
 
+_DISPATCHED_ERROR_HTTP_STATUS: Final[Mapping[int, int]] = {
+    code: ERROR_CODE_HTTP_STATUS[code]
+    for code in (HEADER_MISMATCH, MISSING_REQUIRED_CLIENT_CAPABILITY, UNSUPPORTED_PROTOCOL_VERSION, METHOD_NOT_FOUND)
+}
+"""The statuses the spec assigns per error code; any other error from a dispatched request is in-band on 200.
+
+`INVALID_PARAMS` is 400 only as a ladder rejection (a malformed envelope); from
+dispatch it is an ordinary JSON-RPC error, such as a missing resource.
+"""
+
+
 async def _write(
     msg: JSONRPCResponse | JSONRPCError,
     scope: Scope,
     receive: Receive,
     send: Send,
+    *,
+    error_statuses: Mapping[int, int] = ERROR_CODE_HTTP_STATUS,
 ) -> None:
-    """Serialise a JSON-RPC reply with the table-mapped HTTP status."""
-    status = ERROR_CODE_HTTP_STATUS.get(msg.error.code, 200) if isinstance(msg, JSONRPCError) else 200
+    """Serialise a JSON-RPC reply, taking an error's HTTP status from `error_statuses` (200 if unmapped)."""
+    status = error_statuses.get(msg.error.code, 200) if isinstance(msg, JSONRPCError) else 200
     body = msg.model_dump(mode="json", by_alias=True, exclude_none=True)
     if isinstance(msg, JSONRPCError) and msg.id is None:
         # JSON-RPC requires `id: null` to appear on the wire when the request
@@ -459,7 +476,7 @@ async def handle_modern_request(
         msg = await _to_jsonrpc_response(
             req.id, serve_one(app, dctx, req.method, req.params, connection=connection, lifespan_state=lifespan_state)
         )
-        await _write(msg, scope, receive, send)
+        await _write(msg, scope, receive, send, error_statuses=_DISPATCHED_ERROR_HTTP_STATUS)
         return
 
     send_ch, recv_ch = anyio.create_memory_object_stream[bytes](0)
@@ -494,10 +511,8 @@ async def handle_modern_request(
 
         if done:
             # Handler completed within the deferral window without emitting:
-            # `application/json` with the table-mapped status. Kernel-dispatch
-            # errors (METHOD_NOT_FOUND, missing-capability, INVALID_PARAMS)
-            # resolve here in practice.
-            await _write(result[0], scope, receive, send)
+            # `application/json`, so METHOD_NOT_FOUND still gets its spec `404`.
+            await _write(result[0], scope, receive, send, error_statuses=_DISPATCHED_ERROR_HTTP_STATUS)
         else:
             # First notification arrived, or the deferral window elapsed: commit
             # `text/event-stream` and start pinging so a proxy idle-read timeout
