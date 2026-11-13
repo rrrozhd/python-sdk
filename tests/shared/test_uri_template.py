@@ -763,9 +763,9 @@ def test_match_falls_back_to_empty_ifemp_when_greedy_span_is_invalid():
     assert t.match(";a=end.foo=endTAIL") == {"a": "", "rest": ["foo=endTAIL"]}
 
 
-def test_match_retries_each_ifemp_state_once(monkeypatch: pytest.MonkeyPatch):
+def test_match_with_many_ifemp_captures_decodes_linearly(monkeypatch: pytest.MonkeyPatch):
     # Every {;a_i} has a valid '=value' form and the URI fails only at the
-    # end; without remembering failed retries this decodes about 2**k values.
+    # end; retrying each capture's empty form would decode about 2**k values.
     k = 20
     t = UriTemplate.parse("".join(f"{{;a{i}}}=x{{b{i}}}X" for i in range(k)) + "END{+rest}")
     uri = "".join(f";a{i}=xv=xwX" for i in range(k)) + "FAIL"
@@ -777,7 +777,7 @@ def test_match_retries_each_ifemp_state_once(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr("mcp.shared.uri_template.unquote", counting_unquote)
     assert t.match(uri) is None
-    assert len(decoded) <= k * k
+    assert len(decoded) <= 4 * k
 
 
 def test_match_prefix_ifemp_empty_before_non_stop_literal():
