@@ -13,11 +13,12 @@ Matching semantics
 ------------------
 
 Matching is not specified by RFC 6570 (§1.4 explicitly defers to regex
-languages). This implementation uses a two-ended scan whose only
-backtracking is retrying a ``{;var}`` followed by a literal that starts
-with ``=`` as empty: match time is O(2^k·n·v) where n is URI length, v
-is the number of template variables and k (a property of the template,
-usually 0) is the number of such ``{;var}`` expressions. Realistic
+languages). This implementation uses a two-ended scan: match time is
+O(n·v) where n is URI length and v is the number of template variables.
+The one exception is a ``{;var}`` before the multi-segment variable
+whose ``=value`` form leads to a failed match: it is retried as empty,
+and failed retry states are remembered so each (variable, position)
+pair is scanned at most once, bounding the work by O(n²·v²). Realistic
 templates have v < 10, making this effectively linear; there is no
 input that produces superpolynomial time.
 
@@ -562,24 +563,13 @@ class UriTemplate:
         if suffix is None:
             return None
         suffix_result, suffix_start = suffix
-        prefix = _scan_prefix(self._prefix, uri, 0, suffix_start)
-        if prefix is None:
+        # The prefix scan also decodes the greedy var from the gap up to
+        # suffix_start, so a greedy span that fails validation can send an
+        # ifemp capture back to its other form.
+        prefix_result = _scan_prefix(self._prefix, uri, suffix_start, self._greedy)
+        if prefix_result is None:
             return None
-        prefix_result, prefix_end = prefix
-
-        # Prefix consumed [0, prefix_end); suffix consumed [suffix_start, n);
-        # the greedy var takes the gap. The prefix scan is bounded by
-        # suffix_start, so this holds by construction; guard explicitly
-        # rather than asserting so a future regression surfaces as a
-        # non-match, not an exception.
-        if suffix_start < prefix_end:
-            return None  # pragma: no cover - unreachable while bounds hold
-        middle = uri[prefix_end:suffix_start]
-        greedy_value = _extract_greedy(self._greedy, middle)
-        if greedy_value is None:
-            return None
-
-        return {**prefix_result, self._greedy.name: greedy_value, **suffix_result}
+        return {**prefix_result, **suffix_result}
 
     def __str__(self) -> str:
         return self.template
@@ -1053,76 +1043,92 @@ def _scan_suffix(
     return result, pos
 
 
-def _scan_prefix(
-    atoms: Sequence[_Atom], uri: str, start: int, limit: int
-) -> tuple[dict[str, str | list[str]], int] | None:
-    """Scan atoms left-to-right from ``start``, not exceeding ``limit``.
+def _scan_prefix(atoms: Sequence[_Atom], uri: str, limit: int, greedy: Variable) -> dict[str, str | list[str]] | None:
+    """Scan atoms left-to-right from 0, then decode ``greedy`` from the rest up to ``limit``.
 
     Each bounded variable takes the minimum span that lets its
     following literal match (found via ``find``), leaving the
     greedy variable as much of the URI as possible.
     """
-    result: dict[str, str | list[str]] = {}
-    pos = start
-    for i, atom in enumerate(atoms):
-        if isinstance(atom, _Lit):
-            end = pos + len(atom.text)
-            if end > limit or uri[pos:end] != atom.text:
-                return None
-            pos = end
-            continue
+    # (atom index, position) states already known to fail. Only an ifemp
+    # capture whose '=value' form is found branches, so each state is
+    # scanned at most once.
+    failed: set[tuple[int, int]] = set()
 
-        var = atom.var
-        stops = _STOP_CHARS[var.operator]
-        # Every capture here is followed by a literal: the parser rejects
-        # two adjacent captures, and a capture at the END of the prefix
-        # would be adjacent to the greedy variable.
-        nxt = atoms[i + 1]
-        assert isinstance(nxt, _Lit)
-
-        if atom.ifemp:
-            # RFC §3.2.7 ifemp: ;name=val for non-empty, bare ;name for
-            # empty. Decide which form is present without falling through
-            # to the stop-char scan when the value is empty.
-            if pos < limit and uri[pos] == "=":
-                # Try '=value' before the empty form: for a literal starting
-                # with '=', ';a=end=end' reads as a='end' or as a='' then
-                # '=end', and expand() produces it for a='end'. If the rest
-                # of the prefix fails after the value, fall back to the
-                # empty form. Each such capture at most doubles the work,
-                # which stays linear in the URI length.
-                latest = pos + 1
-                while latest < limit and uri[latest] not in stops:
-                    latest += 1
-                end = uri.find(nxt.text, pos + 1, min(latest + len(nxt.text), limit))
-                if end != -1:
-                    tail = _scan_prefix(atoms[i + 1 :], uri, end, limit)
-                    if tail is not None:
-                        tail_result, tail_end = tail
-                        return {**result, var.name: unquote(uri[pos + 1 : end]), **tail_result}, tail_end
-            if uri.startswith(nxt.text, pos):
-                # Following literal begins immediately: value is empty.
-                result[var.name] = ""
+    def scan(first: int, start: int) -> dict[str, str | list[str]] | None:
+        result: dict[str, str | list[str]] = {}
+        pos = start
+        for i in range(first, len(atoms)):
+            atom = atoms[i]
+            if isinstance(atom, _Lit):
+                end = pos + len(atom.text)
+                if end > limit or uri[pos:end] != atom.text:
+                    return None
+                pos = end
                 continue
-            # Neither form fits: the URI's name continued past the
-            # template's (e.g. ;keys vs ;key) — no parse.
+
+            var = atom.var
+            stops = _STOP_CHARS[var.operator]
+            # Every capture here is followed by a literal: the parser rejects
+            # two adjacent captures, and a capture at the END of the prefix
+            # would be adjacent to the greedy variable.
+            nxt = atoms[i + 1]
+            assert isinstance(nxt, _Lit)
+
+            if atom.ifemp:
+                # RFC §3.2.7 ifemp: ;name=val for non-empty, bare ;name for
+                # empty. Decide which form is present without falling through
+                # to the stop-char scan when the value is empty.
+                if pos < limit and uri[pos] == "=":
+                    # Try '=value' before the empty form: for a literal
+                    # starting with '=', ';a=end=end' reads as a='end' or as
+                    # a='' then '=end', and expand() produces it for a='end'.
+                    # If the rest of the match fails after the value, fall
+                    # back to the empty form.
+                    latest = pos + 1
+                    while latest < limit and uri[latest] not in stops:
+                        latest += 1
+                    end = uri.find(nxt.text, pos + 1, min(latest + len(nxt.text), limit))
+                    if end != -1 and (i + 1, end) not in failed:
+                        tail = scan(i + 1, end)
+                        if tail is not None:
+                            return {**result, var.name: unquote(uri[pos + 1 : end]), **tail}
+                        failed.add((i + 1, end))
+                if uri.startswith(nxt.text, pos):
+                    # Following literal begins immediately: value is empty.
+                    result[var.name] = ""
+                    continue
+                # Neither form fits: the URI's name continued past the
+                # template's (e.g. ;keys vs ;key) — no parse.
+                return None
+
+            # Latest valid end: the var stops at the first stop-char or
+            # the scan limit, whichever comes first.
+            latest = pos
+            while latest < limit and uri[latest] not in stops:
+                latest += 1
+
+            # First occurrence of the following literal: the capture takes
+            # the minimum span, leaving the greedy variable as much of the
+            # URI as possible. The search window's upper bound already
+            # forces any hit to start at or before ``latest``, so the var
+            # never extends past a stop-char.
+            end = uri.find(nxt.text, pos, latest + len(nxt.text))
+            if end == -1:
+                return None
+
+            result[var.name] = unquote(uri[pos:end])
+            pos = end
+
+        # Every literal and capture above is bounded by limit, so this
+        # holds by construction; guard explicitly rather than asserting so
+        # a future regression surfaces as a non-match, not an exception.
+        if limit < pos:
+            return None  # pragma: no cover - unreachable while bounds hold
+        greedy_value = _extract_greedy(greedy, uri[pos:limit])
+        if greedy_value is None:
             return None
+        result[greedy.name] = greedy_value
+        return result
 
-        # Latest valid end: the var stops at the first stop-char or
-        # the scan limit, whichever comes first.
-        latest = pos
-        while latest < limit and uri[latest] not in stops:
-            latest += 1
-
-        # First occurrence of the following literal: the capture takes
-        # the minimum span, leaving the greedy variable as much of the
-        # URI as possible. The search window's upper bound already
-        # forces any hit to start at or before ``latest``, so the var
-        # never extends past a stop-char.
-        end = uri.find(nxt.text, pos, latest + len(nxt.text))
-        if end == -1:
-            return None
-
-        result[var.name] = unquote(uri[pos:end])
-        pos = end
-    return result, pos
+    return scan(0, 0)
