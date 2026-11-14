@@ -48,7 +48,7 @@ from mcp_types import (
     TextContent,
     TextResourceContents,
 )
-from pydantic import AfterValidator, BaseModel, ValidationError
+from pydantic import AfterValidator, BaseModel, Field, ValidationError
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
 from typing_extensions import TypedDict
@@ -3322,3 +3322,127 @@ async def test_middleware_can_refuse_subscriptions_listen_before_the_ack() -> No
                 pass  # pragma: no cover - the refusal precedes the stream
     assert exc_info.value.error.code == INVALID_REQUEST
     assert exc_info.value.error.message == "not permitted to watch the requested resources"
+
+
+async def test_tools_with_positional_only_parameters_return_their_result_and_keep_their_schema():
+    """A sync or async tool declaring `x: str, /` is called with the advertised `x` and advertises
+    the same input schema as `x: str` (SDK-defined; upstream issue 3760)."""
+    mcp = MCPServer()
+
+    @mcp.tool()
+    def echo(x: str, /) -> str:
+        return x
+
+    @mcp.tool()
+    async def echo_async(x: str, /) -> str:
+        return x
+
+    @mcp.tool()
+    def echo_plain(x: str) -> str:
+        raise NotImplementedError
+
+    async with Client(mcp) as client:
+        sync_result = await client.call_tool("echo", {"x": "hi"})
+        async_result = await client.call_tool("echo_async", {"x": "hi"})
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+
+    assert not sync_result.is_error
+    assert sync_result.content == [TextContent(type="text", text="hi")]
+    assert not async_result.is_error
+    assert async_result.content == [TextContent(type="text", text="hi")]
+    assert tools["echo"].input_schema == tools["echo_plain"].input_schema
+
+
+async def test_tool_mixing_parameter_kinds_receives_defaults_values_and_context():
+    """Positional-only (with and without defaults, after an injected `Context`), ordinary and
+    keyword-only parameters each receive their argument or default (SDK-defined)."""
+    mcp = MCPServer()
+
+    @mcp.tool()
+    def mixed(ctx: Context, a: int, b: int = 2, /, c: int = 3, *, d: int = 4) -> str:
+        return f"{type(ctx).__name__}|{a}|{b}|{c}|{d}"
+
+    async with Client(mcp) as client:
+        defaults = await client.call_tool("mixed", {"a": 1})
+        explicit = await client.call_tool("mixed", {"a": 1, "b": 5, "c": 6, "d": 7})
+
+    assert defaults.content == [TextContent(type="text", text="Context|1|2|3|4")]
+    assert explicit.content == [TextContent(type="text", text="Context|1|5|6|7")]
+
+
+async def test_prompts_and_templates_with_positional_only_parameters_render_their_arguments():
+    """Prompts and resource templates declaring positional-only parameters receive the advertised
+    arguments; an omitted one before a supplied one takes its default (SDK-defined; upstream issue 3760)."""
+    mcp = MCPServer()
+
+    @mcp.prompt()
+    def greet(name: str, /) -> str:
+        return f"Hello, {name}"
+
+    @mcp.prompt()
+    async def greet_mixed(greeting: str = "Hi", name: str = "you", /, *, ctx: Context) -> str:
+        return f"{greeting}, {name} ({type(ctx).__name__})"
+
+    @mcp.resource("posonly://{name}")
+    def read(name: str, /) -> str:
+        return f"content of {name}"
+
+    @mcp.resource("posonly-mixed://{name}{?greeting}")
+    async def read_mixed(greeting: str = "Hi", name: str = "", /, *, ctx: Context) -> str:
+        return f"{greeting}, {name} ({type(ctx).__name__})"
+
+    async with Client(mcp) as client:
+        prompt = await client.get_prompt("greet", {"name": "Alice"})
+        mixed_prompt = await client.get_prompt("greet_mixed", {"name": "Bob"})
+        resource = await client.read_resource("posonly://Alice")
+        mixed_resource = await client.read_resource("posonly-mixed://Bob")
+
+    assert prompt.messages == [PromptMessage(role="user", content=TextContent(type="text", text="Hello, Alice"))]
+    assert mixed_prompt.messages == [
+        PromptMessage(role="user", content=TextContent(type="text", text="Hi, Bob (Context)"))
+    ]
+    assert resource.contents == [
+        TextResourceContents(uri="posonly://Alice", mime_type="text/plain", text="content of Alice")
+    ]
+    assert mixed_resource.contents == [
+        TextResourceContents(uri="posonly-mixed://Bob", mime_type="text/plain", text="Hi, Bob (Context)")
+    ]
+
+
+async def test_omitted_positional_only_prompt_arguments_get_the_same_defaults_as_keyword_ones():
+    """An omitted positional-only prompt argument, trailing or before a supplied one, gets what `validate_call`
+    gives an omitted keyword argument: `Field` and `Annotated` defaults, one `default_factory` call, and no
+    validation of the default (SDK-defined)."""
+    factory_calls: list[None] = []
+
+    def exclaim() -> str:
+        factory_calls.append(None)
+        return "!"
+
+    mcp = MCPServer()
+
+    @mcp.prompt()
+    def trailing(
+        name: str = Field(default="world"), shout: Annotated[str, AfterValidator(str.upper)] = "quiet", /
+    ) -> str:
+        return f"hello {name} {shout}"
+
+    @mcp.prompt()
+    def gaps(
+        greeting: Annotated[str, Field(default="Hi")],
+        punct: str = Field(default_factory=exclaim),
+        tone: Annotated[str, AfterValidator(str.upper)] = "calm",
+        name: str = "you",
+        /,
+    ) -> str:
+        return f"{greeting}{punct} {tone} {name}"
+
+    async with Client(mcp) as client:
+        trailing_result = await client.get_prompt("trailing", {})
+        gap_result = await client.get_prompt("gaps", {"name": "Bob"})
+
+    assert trailing_result.messages == [
+        PromptMessage(role="user", content=TextContent(type="text", text="hello world quiet"))
+    ]
+    assert gap_result.messages == [PromptMessage(role="user", content=TextContent(type="text", text="Hi! calm Bob"))]
+    assert len(factory_calls) == 1

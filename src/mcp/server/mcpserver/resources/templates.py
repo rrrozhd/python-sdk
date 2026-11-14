@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, validate_call
 from mcp.server.mcpserver.exceptions import ResourceError, UnexpectedResourceError
 from mcp.server.mcpserver.resources.types import FunctionResource, Resource
 from mcp.server.mcpserver.utilities.context_injection import find_context_parameter, inject_context
-from mcp.server.mcpserver.utilities.func_metadata import func_metadata
+from mcp.server.mcpserver.utilities.func_metadata import accept_positional_only_by_name, func_metadata
 from mcp.shared._callable_inspection import is_async_callable
 from mcp.shared.exceptions import MCPError
 from mcp.shared.path_security import contains_path_traversal, is_absolute_path
@@ -156,7 +156,7 @@ class ResourceTemplate(BaseModel):
         parameters = func_arg_metadata.arg_model.model_json_schema()
 
         # ensure the arguments are properly cast
-        fn = validate_call(fn)
+        fn = validate_call(accept_positional_only_by_name(fn))
 
         return cls(
             uri_template=uri_template,
