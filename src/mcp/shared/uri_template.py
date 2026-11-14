@@ -14,8 +14,9 @@ Matching semantics
 
 Matching is not specified by RFC 6570 (§1.4 explicitly defers to regex
 languages). This implementation uses a two-ended scan that never
-backtracks: match time is O(n·v) where n is URI length and v is the
-number of template variables. Realistic templates have v < 10, making
+backtracks (a failed match runs the prefix scan at most once more):
+match time is O(n·v) where n is URI length and v is the number of
+template variables. Realistic templates have v < 10, making
 this effectively linear; there is no input that produces
 superpolynomial time.
 
@@ -560,24 +561,30 @@ class UriTemplate:
         if suffix is None:
             return None
         suffix_result, suffix_start = suffix
-        prefix = _scan_prefix(self._prefix, uri, 0, suffix_start)
-        if prefix is None:
-            return None
-        prefix_result, prefix_end = prefix
+        # A {;var} before a literal starting with '=' reads as '=value' or
+        # as empty. Prefer '=value' (what expand() produces for a value
+        # equal to the literal's tail); if the whole match then fails,
+        # rescan once preferring the empty form.
+        for prefer_value in (True, False):
+            prefix = _scan_prefix(self._prefix, uri, 0, suffix_start, prefer_value=prefer_value)
+            if prefix is None:
+                continue
+            prefix_result, prefix_end = prefix
 
-        # Prefix consumed [0, prefix_end); suffix consumed [suffix_start, n);
-        # the greedy var takes the gap. The prefix scan is bounded by
-        # suffix_start, so this holds by construction; guard explicitly
-        # rather than asserting so a future regression surfaces as a
-        # non-match, not an exception.
-        if suffix_start < prefix_end:
-            return None  # pragma: no cover - unreachable while bounds hold
-        middle = uri[prefix_end:suffix_start]
-        greedy_value = _extract_greedy(self._greedy, middle)
-        if greedy_value is None:
-            return None
+            # Prefix consumed [0, prefix_end); suffix consumed [suffix_start, n);
+            # the greedy var takes the gap. The prefix scan is bounded by
+            # suffix_start, so this holds by construction; guard explicitly
+            # rather than asserting so a future regression surfaces as a
+            # non-match, not an exception.
+            if suffix_start < prefix_end:
+                return None  # pragma: no cover - unreachable while bounds hold
+            middle = uri[prefix_end:suffix_start]
+            greedy_value = _extract_greedy(self._greedy, middle)
+            if greedy_value is None:
+                continue
 
-        return {**prefix_result, self._greedy.name: greedy_value, **suffix_result}
+            return {**prefix_result, self._greedy.name: greedy_value, **suffix_result}
+        return None
 
     def __str__(self) -> str:
         return self.template
@@ -1052,13 +1059,15 @@ def _scan_suffix(
 
 
 def _scan_prefix(
-    atoms: Sequence[_Atom], uri: str, start: int, limit: int
+    atoms: Sequence[_Atom], uri: str, start: int, limit: int, *, prefer_value: bool
 ) -> tuple[dict[str, str | list[str]], int] | None:
     """Scan atoms left-to-right from ``start``, not exceeding ``limit``.
 
     Each bounded variable takes the minimum span that lets its
     following literal match (found via ``find``), leaving the
-    greedy variable as much of the URI as possible.
+    greedy variable as much of the URI as possible. ``prefer_value``
+    makes an ifemp capture take ``=value`` over the empty form when
+    both fit.
     """
     result: dict[str, str | list[str]] = {}
     pos = start
@@ -1082,6 +1091,15 @@ def _scan_prefix(
             # RFC §3.2.7 ifemp: ;name=val for non-empty, bare ;name for
             # empty. Decide which form is present without falling through
             # to the stop-char scan when the value is empty.
+            if prefer_value and pos < limit and uri[pos] == "=":
+                latest = pos + 1
+                while latest < limit and uri[latest] not in stops:
+                    latest += 1
+                end = uri.find(nxt.text, pos + 1, min(latest + len(nxt.text), limit))
+                if end != -1:
+                    result[var.name] = unquote(uri[pos + 1 : end])
+                    pos = end
+                    continue
             if uri.startswith(nxt.text, pos):
                 # Following literal begins immediately: value is empty.
                 # Checked before '=' so a literal that itself starts

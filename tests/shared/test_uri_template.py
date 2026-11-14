@@ -3,6 +3,7 @@
 import dataclasses
 import random
 import string
+from urllib.parse import unquote
 
 import pytest
 
@@ -712,6 +713,13 @@ def test_match_greedy_rejection_paths(template: str, uri: str):
         # check runs first so '=' is not mistaken for the ifemp separator.
         ("api{;key}=base/{+path}", "api;key=base/a/b", {"key": "", "path": "a/b"}),
         ("api{;key}=base/{+path}", "api;key=v=base/x", {"key": "v", "path": "x"}),
+        # A value equal to the literal's tail: '=value' wins over the empty
+        # form when the literal follows the value (python-sdk issue 3852).
+        ("{;a}=end{+rest}", ";a=end=end/x", {"a": "end", "rest": "/x"}),
+        # No literal after a value within the stop-char span: empty form.
+        ("{;a}=end{+rest}", ";a=end/x=end/y", {"a": "", "rest": "/x=end/y"}),
+        # The later '=end' belongs to the suffix, not the prefix.
+        ("{;a}=end{+rest}=end/z", ";a=endx=end/z", {"a": "", "rest": "x"}),
     ],
 )
 def test_match_prefix_scan_edge_cases(template: str, uri: str, expected: dict[str, str]):
@@ -729,6 +737,66 @@ def test_match_prefix_scan_edge_cases(template: str, uri: str, expected: dict[st
 )
 def test_match_suffix_ifemp_equals_in_value(template: str, uri: str, expected: dict[str, str]):
     assert UriTemplate.parse(template).match(uri) == expected
+
+
+@pytest.mark.parametrize(
+    ("template", "variables"),
+    [
+        ("{;a}=end{+rest}", {"a": "end", "rest": "/x"}),
+        ("{;a}=end{+rest}", {"a": "", "rest": "/x"}),
+        ("/api{;mode}=fast{/id}", {"mode": "fast", "id": "7"}),
+        ("/api{;mode}=fast{/id}", {"mode": "", "id": "7"}),
+        # '=value' finds the literal but the rest of the prefix then fails,
+        # so the empty form is the only parse.
+        ("{;a}=end{.b}X{+rest}", {"a": "", "b": "foo", "rest": "=end.bar.bazX/x"}),
+    ],
+)
+def test_match_round_trips_ifemp_before_equals_literal(template: str, variables: dict[str, str]):
+    t = UriTemplate.parse(template)
+    assert t.match(t.expand(variables)) == variables
+
+
+def test_match_falls_back_to_empty_ifemp_when_greedy_span_is_invalid():
+    # '=value' leaves 'TAIL' for {.rest*}, which must start with '.'; the
+    # empty form is the only valid parse and must still match.
+    t = UriTemplate.parse("{;a}=end{.rest*}")
+    assert t.match(";a=end.foo=endTAIL") == {"a": "", "rest": ["foo=endTAIL"]}
+
+
+def test_match_with_many_ifemp_captures_decodes_linearly(monkeypatch: pytest.MonkeyPatch):
+    # Every {;a_i} has a valid '=value' form and the URI fails only at the
+    # end; retrying each capture's empty form would decode about 2**k values.
+    k = 20
+    t = UriTemplate.parse("".join(f"{{;a{i}}}=x{{b{i}}}X" for i in range(k)) + "END{+rest}")
+    uri = "".join(f";a{i}=xv=xwX" for i in range(k)) + "FAIL"
+    decoded: list[str] = []
+
+    def counting_unquote(value: str) -> str:
+        decoded.append(value)
+        return unquote(value)
+
+    monkeypatch.setattr("mcp.shared.uri_template.unquote", counting_unquote)
+    assert t.match(uri) is None
+    assert len(decoded) <= 4 * k
+
+
+def test_match_with_many_nonempty_ifemp_captures_does_not_depend_on_stack_depth():
+    # A raised max_variables must keep working: matching may not recurse
+    # once per {;a_i} capture.
+    k = 1100
+    t = UriTemplate.parse("".join(f"{{;a{i}}}" for i in range(k)) + "/{+rest}", max_variables=k + 1)
+    result = t.match("".join(f";a{i}=v" for i in range(k)) + "/tail")
+    assert result == {**{f"a{i}": "v" for i in range(k)}, "rest": "tail"}
+
+
+def test_match_rejects_ifemp_captures_needing_mixed_forms():
+    # Known gap (pinned): {;c} needs '=value' and {;a} needs the empty form.
+    # Neither the '=value'-preferring pass nor main's empty-preferring pass
+    # finds that mix, so this expansion stays unmatched, as before the fix.
+    t = UriTemplate.parse("{;c}=tail{.d}Y{;a}=end{.b}X{+rest}")
+    uri = t.expand({"c": "tail.", "d": "bar", "a": "", "b": "foo", "rest": "=end.bar.bazX/x"})
+    assert uri == ";c=tail.=tail.barY;a=end.fooX=end.bar.bazX/x"
+    assert t.match(uri) is None
 
 
 def test_match_prefix_ifemp_empty_before_non_stop_literal():
