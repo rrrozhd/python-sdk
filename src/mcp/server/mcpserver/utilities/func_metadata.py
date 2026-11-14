@@ -34,6 +34,7 @@ from typing_inspection.introspection import (
 from mcp.server.mcpserver.exceptions import InvalidSignature
 from mcp.server.mcpserver.utilities.logging import get_logger
 from mcp.server.mcpserver.utilities.types import Audio, Image
+from mcp.shared._callable_inspection import is_async_callable
 from mcp.shared.exceptions import MCPDeprecationWarning
 
 logger = get_logger(__name__)
@@ -100,6 +101,44 @@ def _inline_root_ref(schema: dict[str, Any]) -> dict[str, Any]:
     definition = cast(dict[str, Any], schema["$defs"][ref.removeprefix(_LOCAL_DEFS_PREFIX)])
     siblings = {key: value for key, value in schema.items() if key != "$ref"}
     return {**definition, **siblings}
+
+
+def accept_positional_only_by_name(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Return `fn`, or, when it declares positional-only parameters, a wrapper that also accepts them by name.
+
+    The wrapper advertises them as ordinary parameters, so `validate_call` can validate it and apply defaults
+    by name first, and then passes the bound values on to `fn` positionally.
+    """
+    signature = inspect.signature(fn)
+    if all(param.kind is not inspect.Parameter.POSITIONAL_ONLY for param in signature.parameters.values()):
+        return fn
+    by_name = signature.replace(
+        parameters=[
+            param.replace(kind=inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            if param.kind is inspect.Parameter.POSITIONAL_ONLY
+            else param
+            for param in signature.parameters.values()
+        ]
+    )
+
+    if is_async_callable(fn):
+
+        @functools.wraps(fn)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            bound = by_name.bind(*args, **kwargs)
+            return await fn(*bound.args, **bound.kwargs)
+
+        wrapper: Any = async_wrapper
+    else:
+
+        @functools.wraps(fn)
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            bound = by_name.bind(*args, **kwargs)
+            return fn(*bound.args, **bound.kwargs)
+
+        wrapper = sync_wrapper
+    wrapper.__signature__ = by_name
+    return wrapper
 
 
 class ArgModelBase(BaseModel):
@@ -170,6 +209,7 @@ class FuncMetadata(BaseModel):
         `arguments` is the output of `validate_arguments`. A sync function runs on a
         worker thread.
         """
+        fn = accept_positional_only_by_name(fn)
         kwargs = arguments | (arguments_to_pass_directly or {})
         if fn_is_async:
             return await fn(**kwargs)

@@ -12,7 +12,7 @@ from mcp_types import INVALID_PARAMS, ContentBlock, Icon, InputRequiredResult, T
 from pydantic import BaseModel, Field, TypeAdapter, validate_call
 
 from mcp.server.mcpserver.utilities.context_injection import find_context_parameter, inject_context
-from mcp.server.mcpserver.utilities.func_metadata import func_metadata
+from mcp.server.mcpserver.utilities.func_metadata import accept_positional_only_by_name, func_metadata
 from mcp.server.mcpserver.utilities.types import Audio, Image
 from mcp.shared._callable_inspection import is_async_callable
 from mcp.shared.exceptions import MCPError
@@ -143,7 +143,7 @@ class Prompt(BaseModel):
                 )
 
         # ensure the arguments are properly cast
-        fn = validate_call(fn)
+        fn = validate_call(accept_positional_only_by_name(fn))
 
         return cls(
             name=func_name,
